@@ -1,4 +1,4 @@
-# Python 3.12
+# Python 3.14 (Ubuntu 26.04 under WSL2); the pins also install on Python 3.12
 # Install with:  pip install -r requirements.txt
 
 # CPU-only PyTorch wheels (keeps Linux/WSL from pulling the CUDA build)
@@ -7,7 +7,7 @@
 # Fusion pass, quantization, reference model, analytical model
 torch==2.9.0
 torchvision==0.24.0
-numpy==2.0.2
+numpy==2.3.5
 
 # RTL verification (drives the simulator)
 cocotb==2.1.0

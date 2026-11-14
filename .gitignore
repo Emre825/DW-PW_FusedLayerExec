@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Simulation (cocotb / Verilator)
+sim_build/
+results.xml
+*.vcd
+*.fst
+
+# Vivado
+.Xil/
+vivado*.jou
+vivado*.log
