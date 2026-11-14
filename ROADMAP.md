@@ -16,8 +16,8 @@ The main workload is MobileNetV2 and the target device is a Xilinx Zynq-7020 (XC
 | Step | Title | Phase | Status |
 |---|---|---|---|
 | 0 | Environment and repo | Setup | Done |
-| 1 | Model capture and BN folding | Software foundation | Next |
-| 2 | Quantization and integer reference model | Software foundation | Planned |
+| 1 | Model capture and BN folding | Software foundation | Done |
+| 2 | Quantization and integer reference model | Software foundation | Next |
 | 3 | Analytical model, first version | Software foundation | Planned |
 | 4 | Fusion pass back end | Software foundation | Planned |
 | 5 | PE, 8×8 systolic array, accumulators | Pointwise path | Planned |
