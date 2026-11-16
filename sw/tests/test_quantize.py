@@ -2,20 +2,9 @@ import numpy as np
 import pytest
 import torch
 
-from sw.capture import INPUT_SHAPE, fold_bn, layer_table
-from sw.quantize import calibrate, fixed_point, parameters, quantize, run_float, run_int, to_int8
+from sw.capture import INPUT_SHAPE
+from sw.quantize import fixed_point, run_float, run_int, to_int8
 from sw.reference import run_layer
-
-
-@pytest.fixture(scope="module")
-def quantized(traced):
-    """Layer table, float parameters, calibration result and integer parameters of the test model."""
-    folded = fold_bn(traced)
-    layers = layer_table(folded)
-    params = parameters(folded, layers)
-    torch.manual_seed(0)
-    qparams = calibrate(layers, params, torch.randn(4, *INPUT_SHAPE[1:]))
-    return layers, params, qparams, quantize(layers, params, qparams)
 
 
 @pytest.fixture(scope="module")

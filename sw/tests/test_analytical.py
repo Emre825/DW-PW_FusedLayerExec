@@ -5,7 +5,7 @@ import pytest
 import torch.nn as nn
 import torchvision
 
-from sw.analytical import BRAM36_BYTES, Network, Traffic, weight_bytes
+from sw.analytical import BRAM36_BYTES, Network, Traffic, param_bytes, weight_bytes
 from sw.capture import fold_bn, layer_table
 
 EARLY = [(24, 144), (144, 144), (144, 24)]   # (cin, cout) of the expand, depthwise and project layers
@@ -46,6 +46,7 @@ def test_worked_example(mobilenet):
     assert [t.inputs + t.outputs for t in (unfused, pair, whole)] == [1_956_864, 1_053_696, 150_528]
     assert [t.residuals for t in (unfused, pair, whole)] == [75_264, 75_264, 0]
     assert unfused.weights == pair.weights == whole.weights == 8_208
+    assert unfused.params == pair.params == whole.params == 8 * (144 + 144 + 24)
 
 
 def test_late_block(mobilenet):
@@ -61,6 +62,13 @@ def test_weights_match_the_models(traced, mobilenet, resnet):
     assert sum(map(weight_bytes, mobilenet.layers)) == conv_weights(traced)
     assert sum(map(weight_bytes, resnet.layers)) == conv_weights(torchvision.models.resnet18(weights=None))
     assert mobilenet.traffic(0, 3, refetch=5).weights == 5 * mobilenet.traffic(0, 3).weights
+
+
+def test_params_are_one_record_per_output_channel(traced, mobilenet, resnet):
+    channels = sum(m.out_channels for m in traced.modules() if isinstance(m, nn.Conv2d))
+    assert sum(map(param_bytes, mobilenet.layers)) == 8 * channels
+    assert mobilenet.traffic(0, 3, refetch=5).params == 5 * mobilenet.traffic(0, 3).params
+    assert [param_bytes(l) for l in resnet.layers if l.kind == "pool"] == [0]
 
 
 def test_resnet_block_reads_its_input_once_when_fused(resnet):
@@ -86,9 +94,9 @@ def test_pair_buffers(mobilenet):
     two, one = mobilenet.buffers(dw, dw + 2, tile=1), mobilenet.buffers(dw, dw + 2, tile=1, banks=1)
     assert (two.intermediates, one.intermediates, two.accumulators) == (2 * 8_064, 8_064, 1_792)
     assert two.inputs == 3 * 56 * 144 + 56 * 24  # three-row line buffer, and one row of the skip tensor
-    assert (two.outputs, two.weights) == (56 * 24, 144 * 9 + 144 * 24)
-    assert two.total == 49_552
-    assert mobilenet.buffers(dw, dw + 2, tile=1, resident=False).total == 49_552 - two.weights
+    assert (two.outputs, two.weights, two.params) == (56 * 24, 144 * 9 + 144 * 24, 8 * (144 + 24))
+    assert two.total == 50_896
+    assert mobilenet.buffers(dw, dw + 2, tile=1, resident=False).total == 50_896 - two.weights - two.params
 
 
 def test_buffers_grow_with_the_tile_up_to_whole_tensors(mobilenet):
@@ -142,7 +150,7 @@ def test_best_trades_tile_height_for_weight_refetches(mobilenet):
     roomy = mobilenet.best(early, early + 2, budget=inf)
     assert (roomy.tile, roomy.resident) == (1, True)
     # Even when re-fetching them would need less memory: traffic decides, memory only breaks ties.
-    assert mobilenet.best(early, early + 2, budget=50_000).resident
+    assert mobilenet.best(early, early + 2, budget=51_000).resident
 
 
 def test_supported_groups(mobilenet):

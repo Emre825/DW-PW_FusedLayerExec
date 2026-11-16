@@ -19,8 +19,8 @@ The main workload is MobileNetV2 and the target device is a Xilinx Zynq-7020 (XC
 | 1 | Model capture and BN folding | Software foundation | Done |
 | 2 | Quantization and integer reference model | Software foundation | Done |
 | 3 | Analytical model, first version | Software foundation | Done |
-| 4 | Fusion pass back end | Software foundation | Next |
-| 5 | PE, 8×8 systolic array, accumulators | Pointwise path | Planned |
+| 4 | Fusion pass back end | Software foundation | Done |
+| 5 | PE, 8×8 systolic array, accumulators | Pointwise path | Next |
 | 6 | Post-processing unit | Pointwise path | Planned |
 | 7 | Unfused pointwise layers end to end | Pointwise path | Planned |
 | 8 | Depthwise engine | Depthwise and fusion | Planned |
@@ -33,15 +33,16 @@ The main workload is MobileNetV2 and the target device is a Xilinx Zynq-7020 (XC
 
 ## Decisions made
 
-- **Repository layout.** `sw/` holds the fusion pass, quantization, reference model and analytical model; `rtl/` the SystemVerilog; `tb/` the cocotb tests; `syn/` the Vivado scripts; `results/` the experiment outputs. Proposals and the final report live outside the repository.
+- **Repository layout.** `sw/` holds the fusion pass, quantization, reference model and analytical model; `rtl/` the SystemVerilog; `tb/` the cocotb tests; `syn/` the Vivado scripts; `results/` the experiment outputs. `build/` holds the fusion pass's output and is not committed. Proposals and the final report live outside the repository.
 - **Simulation host.** All Python and simulation work runs in Ubuntu 26.04 under WSL2. Vivado runs on Windows.
 - **Tool versions.** Python 3.14, Verilator 5.050 built from source, cocotb 2.1.0, PyTorch 2.9.0 (CPU), Vivado 2026.1. The Python packages are pinned in `requirements.txt`.
 - **Test flow.** pytest launches the simulations through cocotb's Python runner, so there are no Makefiles.
 - **Quantization scheme.** Weights are int8, symmetric, per output channel. Activations are int8, asymmetric (with a zero-point), per tensor. The input zero-point is folded into the bias, so every MAC stays int8 × int8, and depthwise padding uses the zero-point value. Asymmetric activations let ReLU6 outputs use the full 8-bit range at almost no hardware cost.
 - **Integer arithmetic.** `sw/reference.py` is the contract that the RTL must match bit for bit. For each output value: sum the int8 × int8 products, add the int32 bias (the result fits in 32 bits), multiply by a per-channel multiplier below 2^15, shift right by a per-channel amount with ties rounded up, add the output zero-point, and saturate to int8. ReLU6 needs no logic of its own: a ReLU6 output has zero-point −128 and a range of at most 6, so the saturation performs it. A residual layer rescales the skip tensor with one multiplier and shift and adds it before the saturation. The stem convolution and the classifier stay in float.
 - **Calibration data.** 100 training images from Imagenette (320 px version), a public 10-class subset of ImageNet. The dataset lives in a `data/` folder next to the repository, not inside it; `python -m sw.quantize` downloads it there on first use (about 340 MB). Accuracy studies are out of scope; the images only set the activation ranges.
-- **Analytical model.** `sw/analytical.py` counts int8 activations and weights at one byte each; per-channel biases and requantization parameters are added in Step 4. A group is a run of consecutive layers executed one full-width row tile at a time. Line buffers keep the overlapping rows, so no input is read twice. A group's weights are either kept on chip and read once, or re-fetched for every tile. Group selection has three settings: single layers only, depthwise→pointwise pairs as the RTL supports, or any run of layers. Memory budgets are counted in BRAM36 blocks of 4,096 bytes, of which the XC7Z020 has 140.
-- **RTL sizing.** The tile height is one row (T = 1): with the weights on chip, traffic does not depend on T, and the buffers grow with it. The buffers are sized for the largest of the three blocks run in RTL (56×56, 14×14 and 7×7): a three-row depthwise line buffer of 24,192 bytes, one row of the skip tensor (1,344 bytes), two fusion-buffer banks of 8,192 bytes each, an output buffer of 8,192 bytes, accumulators for 56 pixels × 8 channels in int32 (1,792 bytes), and a weight buffer of 307,200 bytes for the 7×7 block's pointwise layer, which alone is 75 BRAM36 blocks. All depths are RTL parameters, so Step 11 can sweep the tile height.
+- **Analytical model.** `sw/analytical.py` counts int8 activations and weights at one byte each, and one 8-byte parameter record (bias, requantization multiplier and shift) per output channel, kept on chip or re-fetched together with the weights. A group is a run of consecutive layers executed one full-width row tile at a time. Line buffers keep the overlapping rows, so no input is read twice. A group's weights are either kept on chip and read once, or re-fetched for every tile. Group selection has three settings: single layers only, depthwise→pointwise pairs as the RTL supports, or any run of layers. Memory budgets are counted in BRAM36 blocks of 4,096 bytes, of which the XC7Z020 has 140.
+- **RTL sizing.** The tile height is one row (T = 1): with the weights on chip, traffic does not depend on T, and the buffers grow with it. The buffers are sized for the largest of the three blocks run in RTL (56×56, 14×14 and 7×7): a three-row depthwise line buffer of 24,192 bytes, one row of the skip tensor (1,344 bytes), two fusion-buffer banks of 8,192 bytes each, an output buffer of 8,192 bytes, accumulators for 56 pixels × 8 channels in int32 (1,792 bytes), a weight buffer of 309,760 bytes for the 7×7 block's pointwise layer (307,200 bytes of weights and 2,560 of parameter records), which alone is 76 BRAM36 blocks, and a separate weight memory of 16,320 bytes in the depthwise engine for the same block's depthwise layer (8,640 bytes of weights and 7,680 of parameter records, 4 BRAM36 blocks). In a fused job both engines read their weights at the same time, so they do not share one memory. All depths are RTL parameters, so Step 11 can sweep the tile height.
+- **Fusion pass output.** `python -m sw.fusion` writes one folder per block to `build/`: the weight image, the parameter image, the block's input, the expected output of each layer, and the unfused and fused job lists. Everything in DRAM is a 64-bit word and addresses count words; the docstring of `sw/fusion.py` is the reference for the formats. An activation word holds 8 channels of one pixel, ordered by row, pixel and channel group. Pointwise weights are 8×8 tiles in the array's loop order (output group, then input group), one word per array row. Depthwise weights are nine words per group of 8 channels, one per tap. Each output channel has one parameter word: int32 bias, 16-bit multiplier, 8-bit shift. A job descriptor is five words and goes to the controller's job queue, not through DRAM; it has no activation field, because the saturation performs ReLU6. Each image file starts with its DRAM address, so `$readmemh` places it. The tensors come from the first Imagenette validation image.
 
 ## Steps
 
@@ -96,7 +97,7 @@ pip install -r requirements.txt
 
 - **What:** pattern matching, job descriptors, weight images and expected outputs.
 - **How:** match depthwise→pointwise pairs, conv–ReLU6 chains and residual additions. Define the job descriptor as a Python dataclass packed to hex. Lay out the weight images in the array's 8×8 tile order. All MobileNetV2 depthwise and pointwise channel counts are multiples of 8, so the pass asserts this instead of padding.
-- **Done when:** descriptors, weight images, input images and expected outputs are emitted for an early, a middle and a late MobileNetV2 block.
+- **Done when:** descriptors, weight images, input images and expected outputs are emitted for an early, a middle and a late MobileNetV2 block. Checked on 16 Nov 2026 with `python -m sw.fusion`: each block gets three unfused jobs and two fused ones (the expand layer, then the depthwise→pointwise pair), and the image sizes equal the analytical model's traffic.
 
 ### Phase 2: Pointwise path
 
@@ -155,7 +156,7 @@ pip install -r requirements.txt
 #### Step 13. Model validation and whole-network study
 
 - **What:** the analytical model's error against the RTL byte counters, fusion groups under several BRAM budgets, pair versus whole-block fusion, and the equal-memory unfused baseline.
-- **How:** calibrate the model's re-fetch factors against the measurements, then generate the plots for MobileNetV2 and ResNet-18.
+- **How:** calibrate the model's re-fetch factors against the measurements, then generate the plots for MobileNetV2 and ResNet-18. Also check the model's skip-tensor buffer rule (one tile per bypassed layer), which is an estimate, against the RTL.
 - **Done when:** the model error is reported and the whole-network figures are generated.
 
 #### Step 14. Report and presentation

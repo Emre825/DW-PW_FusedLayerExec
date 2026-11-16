@@ -4,16 +4,22 @@ Weights are int8, symmetric, per output channel. Activations are int8, asymmetri
 real = scale * (q - zero). The stem convolution and the classifier stay in float; the integer
 chain covers the depthwise and pointwise layers between them.
 """
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torchvision
 from torch.fx import GraphModule
 
-from sw.capture import Layer
+from sw.capture import Layer, fold_bn, layer_table, trace
 from sw.reference import QLayer, run_layer
 
 Params = dict[str, tuple[torch.Tensor, torch.Tensor]]  # layer name -> (weight, bias), float
 QParams = dict[str, tuple[float, int]]                 # layer name -> (scale, zero-point) of its output
+
+DATA_DIR = Path(__file__).resolve().parents[2] / "data"  # next to the repository, not inside it
+WEIGHTS = torchvision.models.MobileNet_V2_Weights.IMAGENET1K_V1
 
 
 def parameters(folded: GraphModule, layers: list[Layer]) -> Params:
@@ -99,28 +105,26 @@ def run_int(layers: list[Layer], qlayers: list[QLayer], x: np.ndarray) -> dict[s
     return outs
 
 
-if __name__ == "__main__":
-    from pathlib import Path
+def imagenette(split: str, count: int) -> torch.Tensor:
+    """`count` preprocessed Imagenette images, evenly spread over the classes."""
+    dataset = torchvision.datasets.Imagenette(DATA_DIR, split, size="320px", download=True,
+                                              transform=WEIGHTS.transforms())
+    return torch.stack([dataset[i][0] for i in range(0, len(dataset), len(dataset) // count)][:count])
 
-    import torchvision
 
-    from sw.capture import fold_bn, layer_table, trace
-
-    data_dir = Path(__file__).resolve().parents[2] / "data"  # next to the repository, not inside it
-    weights = torchvision.models.MobileNet_V2_Weights.IMAGENET1K_V1
-
-    def images(split: str, count: int) -> torch.Tensor:
-        """`count` preprocessed Imagenette images, evenly spread over the classes."""
-        dataset = torchvision.datasets.Imagenette(data_dir, split, size="320px", download=True,
-                                                  transform=weights.transforms())
-        return torch.stack([dataset[i][0] for i in range(0, len(dataset), len(dataset) // count)][:count])
-
-    model = torchvision.models.mobilenet_v2(weights=weights).eval()
+def mobilenet_v2():
+    """Pretrained MobileNetV2, calibrated on 100 training images: the model, its layer table,
+    the float parameters, the calibration result and the integer parameters."""
+    model = torchvision.models.mobilenet_v2(weights=WEIGHTS).eval()
     folded = fold_bn(trace(model))
     layers = layer_table(folded)
     params = parameters(folded, layers)
-    qparams = calibrate(layers, params, images("train", 100))
-    qlayers = quantize(layers, params, qparams)
+    qparams = calibrate(layers, params, imagenette("train", 100))
+    return model, layers, params, qparams, quantize(layers, params, qparams)
+
+
+if __name__ == "__main__":
+    model, layers, params, qparams, qlayers = mobilenet_v2()
 
     shifts = np.concatenate([q.shift for q in qlayers])
     biases = np.concatenate([q.bias for q in qlayers])
@@ -128,7 +132,7 @@ if __name__ == "__main__":
           f" {shifts.max()}, largest |bias| {np.abs(biases).max()}")
 
     stem, last = layers[0].name, layers[-1].name
-    held_out = images("val", 100)
+    held_out = imagenette("val", 100)
     agree = 0
     with torch.no_grad():
         for image in held_out:

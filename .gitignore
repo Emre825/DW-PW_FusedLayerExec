@@ -5,6 +5,9 @@ __pycache__/
 .venv/
 venv/
 
+# Fusion pass output (python -m sw.fusion)
+build/
+
 # Simulation (cocotb / Verilator)
 sim_build/
 results.xml

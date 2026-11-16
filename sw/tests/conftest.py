@@ -4,6 +4,7 @@ import torch.nn as nn
 import torchvision
 
 from sw.capture import INPUT_SHAPE, fold_bn, layer_table, trace
+from sw.quantize import calibrate, parameters, quantize
 
 
 @pytest.fixture(scope="session")
@@ -23,6 +24,17 @@ def traced():
     with torch.no_grad():
         model.train()(torch.randn(4, *INPUT_SHAPE[1:]))
     return trace(model)
+
+
+@pytest.fixture(scope="session")
+def quantized(traced):
+    """Layer table, float parameters, calibration result and integer parameters of the test model."""
+    folded = fold_bn(traced)
+    layers = layer_table(folded)
+    params = parameters(folded, layers)
+    torch.manual_seed(0)
+    qparams = calibrate(layers, params, torch.randn(4, *INPUT_SHAPE[1:]))
+    return layers, params, qparams, quantize(layers, params, qparams)
 
 
 @pytest.fixture(scope="session")
