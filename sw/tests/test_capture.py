@@ -45,6 +45,30 @@ def test_layer_counts_and_shapes(layers):
     assert all(l.cin % 8 == 0 and l.cout % 8 == 0 for l in layers if l.kind != "conv")
 
 
+def test_mobilenet_is_a_linear_chain(layers):
+    assert layers[0].src is None
+    assert all(l.src == prev.name for prev, l in zip(layers, layers[1:]))
+
+
+def test_resnet18_layers(resnet_layers):
+    kinds = [l.kind for l in resnet_layers]
+    assert (kinds.count("conv"), kinds.count("pw"), kinds.count("pool")) == (17, 3, 1)
+    assert all(l.hout == l.hin // l.stride and l.wout == l.win // l.stride for l in resnet_layers)
+    assert sum(l.residual is not None for l in resnet_layers) == 8  # one per basic block
+    by_name = {l.name: l for l in resnet_layers}
+
+    # Plain block: the second convolution adds the block input, then applies ReLU.
+    conv2 = by_name["layer1_0_conv2"]
+    assert (conv2.src, conv2.residual, conv2.act) == ("layer1_0_conv1", "maxpool", "relu")
+
+    # Block with a shortcut convolution: it reads the block input, adds the main path, then ReLU.
+    shortcut = by_name["layer2_0_downsample_0"]
+    assert (shortcut.kind, shortcut.stride, shortcut.act) == ("pw", 2, "relu")
+    assert (shortcut.src, shortcut.residual) == ("layer1_1_conv2", "layer2_0_conv2")
+    assert by_name["layer2_0_conv2"].act is None
+    assert by_name["layer2_1_conv1"].src == "layer2_0_downsample_0"
+
+
 def test_residuals(layers):
     with_residual = [i for i, l in enumerate(layers) if l.residual]
     assert len(with_residual) == 10

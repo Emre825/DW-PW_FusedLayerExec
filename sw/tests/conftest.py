@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torchvision
 
-from sw.capture import INPUT_SHAPE, trace
+from sw.capture import INPUT_SHAPE, fold_bn, layer_table, trace
 
 
 @pytest.fixture(scope="session")
@@ -23,3 +23,9 @@ def traced():
     with torch.no_grad():
         model.train()(torch.randn(4, *INPUT_SHAPE[1:]))
     return trace(model)
+
+
+@pytest.fixture(scope="session")
+def resnet_layers():
+    """Layer table of an untrained ResNet-18 (no download)."""
+    return layer_table(fold_bn(trace(torchvision.models.resnet18(weights=None))))

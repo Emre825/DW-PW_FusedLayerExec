@@ -18,8 +18,8 @@ The main workload is MobileNetV2 and the target device is a Xilinx Zynq-7020 (XC
 | 0 | Environment and repo | Setup | Done |
 | 1 | Model capture and BN folding | Software foundation | Done |
 | 2 | Quantization and integer reference model | Software foundation | Done |
-| 3 | Analytical model, first version | Software foundation | Next |
-| 4 | Fusion pass back end | Software foundation | Planned |
+| 3 | Analytical model, first version | Software foundation | Done |
+| 4 | Fusion pass back end | Software foundation | Next |
 | 5 | PE, 8×8 systolic array, accumulators | Pointwise path | Planned |
 | 6 | Post-processing unit | Pointwise path | Planned |
 | 7 | Unfused pointwise layers end to end | Pointwise path | Planned |
@@ -40,6 +40,8 @@ The main workload is MobileNetV2 and the target device is a Xilinx Zynq-7020 (XC
 - **Quantization scheme.** Weights are int8, symmetric, per output channel. Activations are int8, asymmetric (with a zero-point), per tensor. The input zero-point is folded into the bias, so every MAC stays int8 × int8, and depthwise padding uses the zero-point value. Asymmetric activations let ReLU6 outputs use the full 8-bit range at almost no hardware cost.
 - **Integer arithmetic.** `sw/reference.py` is the contract that the RTL must match bit for bit. For each output value: sum the int8 × int8 products, add the int32 bias (the result fits in 32 bits), multiply by a per-channel multiplier below 2^15, shift right by a per-channel amount with ties rounded up, add the output zero-point, and saturate to int8. ReLU6 needs no logic of its own: a ReLU6 output has zero-point −128 and a range of at most 6, so the saturation performs it. A residual layer rescales the skip tensor with one multiplier and shift and adds it before the saturation. The stem convolution and the classifier stay in float.
 - **Calibration data.** 100 training images from Imagenette (320 px version), a public 10-class subset of ImageNet. The dataset lives in a `data/` folder next to the repository, not inside it; `python -m sw.quantize` downloads it there on first use (about 340 MB). Accuracy studies are out of scope; the images only set the activation ranges.
+- **Analytical model.** `sw/analytical.py` counts int8 activations and weights at one byte each; per-channel biases and requantization parameters are added in Step 4. A group is a run of consecutive layers executed one full-width row tile at a time. Line buffers keep the overlapping rows, so no input is read twice. A group's weights are either kept on chip and read once, or re-fetched for every tile. Group selection has three settings: single layers only, depthwise→pointwise pairs as the RTL supports, or any run of layers. Memory budgets are counted in BRAM36 blocks of 4,096 bytes, of which the XC7Z020 has 140.
+- **RTL sizing.** The tile height is one row (T = 1): with the weights on chip, traffic does not depend on T, and the buffers grow with it. The buffers are sized for the largest of the three blocks run in RTL (56×56, 14×14 and 7×7): a three-row depthwise line buffer of 24,192 bytes, one row of the skip tensor (1,344 bytes), two fusion-buffer banks of 8,192 bytes each, an output buffer of 8,192 bytes, accumulators for 56 pixels × 8 channels in int32 (1,792 bytes), and a weight buffer of 307,200 bytes for the 7×7 block's pointwise layer, which alone is 75 BRAM36 blocks. All depths are RTL parameters, so Step 11 can sweep the tile height.
 
 ## Steps
 
@@ -88,7 +90,7 @@ pip install -r requirements.txt
 
 - **What:** off-chip traffic and on-chip buffer size per layer and per fusion group as a function of tile height, plus group selection under a memory budget.
 - **How:** a Python script over the Step 1 layer table, with the group selection as a dynamic program. Run it on MobileNetV2 and ResNet-18.
-- **Done when:** unit tests reproduce the proposal's worked example for activation traffic (56×56 block, 24→144→24 channels: 1,956,864 bytes unfused, 1,053,696 with the pair fused, 150,528 with the whole block fused), and the tile height and buffer sizes for the RTL are chosen.
+- **Done when:** unit tests reproduce the proposal's worked example for activation traffic (56×56 block, 24→144→24 channels: 1,956,864 bytes unfused, 1,053,696 with the pair fused, 150,528 with the whole block fused), and the tile height and buffer sizes for the RTL are chosen. Checked on 16 Nov 2026 with `python -m sw.analytical`: the tests reproduce the three numbers, and with every depthwise→pointwise pair fused the model predicts that MobileNetV2's activation traffic falls from 13.66 MB to 9.06 MB.
 
 #### Step 4. Fusion pass back end
 

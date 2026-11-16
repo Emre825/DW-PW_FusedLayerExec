@@ -13,9 +13,9 @@ INPUT_SHAPE = (1, 3, 224, 224)
 
 @dataclass(frozen=True)
 class Layer:
-    """One convolution, with the activation and the residual addition that follow it."""
+    """One convolution or max pooling, with the residual addition and the activation that follow it."""
     name: str                    # fx node name; also names the layer's output tensor
-    kind: str                    # "conv" (standard), "dw" (depthwise) or "pw" (pointwise)
+    kind: str                    # "conv" (standard), "dw" (depthwise), "pw" (pointwise) or "pool"
     cin: int
     cout: int
     kernel: int
@@ -24,8 +24,9 @@ class Layer:
     win: int
     hout: int
     wout: int
-    act: str | None = None       # "relu6", or None for a linear layer
+    act: str | None = None       # "relu6" or "relu", or None for a linear layer
     residual: str | None = None  # layer whose output is added to this one's, or None
+    src: str | None = None       # layer whose output this one reads, or None for the network input
 
 
 def trace(model: nn.Module) -> GraphModule:
@@ -59,27 +60,29 @@ def fold_bn(gm: GraphModule) -> GraphModule:
 
 
 def layer_table(gm: GraphModule) -> list[Layer]:
-    """List the convolutions of a BN-folded graph in execution order."""
+    """List the convolutions and max poolings of a BN-folded graph in execution order."""
     modules = dict(gm.named_modules())
     layers: list[Layer] = []
     owner = {}  # fx node -> name of the layer whose output tensor it carries
     for node in gm.graph.nodes:
         module = modules.get(node.target) if node.op == "call_module" else None
-        if isinstance(module, nn.Conv2d):
+        if isinstance(module, (nn.Conv2d, nn.MaxPool2d)):
             src = node.args[0]
-            assert not layers or owner[src] == layers[-1].name, "expected a linear chain of layers"
             _, cin, hin, win = src.meta["tensor_meta"].shape
             _, cout, hout, wout = node.meta["tensor_meta"].shape
-            if module.groups == 1:
-                kind = "pw" if module.kernel_size == (1, 1) else "conv"
+            kernel, stride = (v if isinstance(v, int) else v[0] for v in (module.kernel_size, module.stride))
+            if isinstance(module, nn.MaxPool2d):
+                kind = "pool"
+            elif module.groups == 1:
+                kind = "pw" if kernel == 1 else "conv"
             else:
                 assert module.groups == cin == cout
                 kind = "dw"
-            layers.append(Layer(node.name, kind, cin, cout, module.kernel_size[0], module.stride[0],
-                                hin, win, hout, wout))
-        elif isinstance(module, nn.ReLU6):
+            layers.append(Layer(node.name, kind, cin, cout, kernel, stride, hin, win, hout, wout,
+                                src=owner.get(src)))
+        elif isinstance(module, (nn.ReLU6, nn.ReLU)):
             assert owner[node.args[0]] == layers[-1].name
-            layers[-1] = replace(layers[-1], act="relu6")
+            layers[-1] = replace(layers[-1], act=type(module).__name__.lower())
         elif node.op == "call_function" and node.target is operator.add:
             # One operand is the layer just built; the other is the skip connection.
             skip, = (arg for arg in node.args if owner[arg] != layers[-1].name)
